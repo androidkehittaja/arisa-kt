@@ -219,12 +219,14 @@ fun mockUser(
     name: String = "user",
     displayName: String = "User",
     getGroups: () -> List<String>? = { null },
-    isNewUser: () -> Boolean = { false }
+    isNewUser: () -> Boolean = { false },
+    isBotUser: () -> Boolean = { false }
 ) = User(
     name,
     displayName,
     getGroups,
-    isNewUser
+    isNewUser,
+    isBotUser,
 )
 
 fun mockVersion(

@@ -5,13 +5,24 @@ import io.github.mojira.arisa.utils.mockAttachment
 import io.github.mojira.arisa.utils.mockChangeLogItem
 import io.github.mojira.arisa.utils.mockComment
 import io.github.mojira.arisa.utils.mockIssue
+import io.github.mojira.arisa.utils.mockUser
 import io.kotest.assertions.arrow.either.shouldBeLeft
 import io.kotest.assertions.arrow.either.shouldBeRight
 import io.kotest.core.spec.style.StringSpec
+import io.kotest.matchers.collections.shouldContain
+import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 
 private val ALLOWED_REGEX = listOf("allowed@.*".toRegex())
-private val MODULE = PrivacyModule("message", "\n----\nRestricted by PrivacyModule ??[~arisabot]??", ALLOWED_REGEX, emptyList())
+private val NOOP_REDACTOR = AttachmentRedactor { null }
+private val MODULE = PrivacyModule(
+    "message",
+    "\n----\nRestricted by PrivacyModule ??[~arisabot]??",
+    ALLOWED_REGEX,
+    NOOP_REDACTOR,
+    emptyList()
+)
 private val TWO_SECONDS_AGO = RIGHT_NOW.minusSeconds(2)
 private val TEN_SECONDS_AGO = RIGHT_NOW.minusSeconds(10)
 
@@ -386,7 +397,7 @@ class PrivacyModuleTest : StringSpec({
 
     "should mark as private when attachment has sensitive name" {
         val sensitiveFileName = "sensitive.txt"
-        val module = PrivacyModule("message", "comment", ALLOWED_REGEX, listOf(sensitiveFileName))
+        val module = PrivacyModule("message", "comment", ALLOWED_REGEX, NOOP_REDACTOR, listOf(sensitiveFileName))
         var hasSetPrivate = false
 
         val issue = mockIssue(
@@ -406,7 +417,7 @@ class PrivacyModuleTest : StringSpec({
 
     "should not mark as private when attachment has non-sensitive name" {
         val sensitiveFileName = "sensitive.txt"
-        val module = PrivacyModule("message", "comment", ALLOWED_REGEX, listOf(sensitiveFileName))
+        val module = PrivacyModule("message", "comment", ALLOWED_REGEX, NOOP_REDACTOR, listOf(sensitiveFileName))
         var hasSetPrivate = false
 
         val issue = mockIssue(
@@ -422,5 +433,168 @@ class PrivacyModuleTest : StringSpec({
 
         result.shouldBeLeft(OperationNotNeededModuleResponse)
         hasSetPrivate shouldBe false
+    }
+
+    "should redact access tokens" {
+        val module = PrivacyModule("message", "comment", ALLOWED_REGEX, AccessTokenRedactor, emptyList())
+        val uploader = "some-user"
+        val attachmentName = "my-attachment.txt"
+
+        var hasSetPrivate = false
+        var hasDeletedAttachment = false
+        lateinit var newAttachmentName: String
+        lateinit var newAttachmentContent: String
+        lateinit var addedComment: String
+
+        val issue = mockIssue(
+            attachments = listOf(
+                mockAttachment(
+                    name = attachmentName,
+                    uploader = mockUser(
+                        name = uploader
+                    ),
+                    // Example JWT token from https://jwt.io/
+                    getContent = { "... --accessToken eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c ...".toByteArray() },
+                    remove = { hasDeletedAttachment = true }
+                )
+            ),
+            setPrivate = { hasSetPrivate = true },
+            addAttachment = { file, cleanupCallback ->
+                newAttachmentName = file.name
+                newAttachmentContent = file.readText()
+                cleanupCallback()
+            },
+            addRawRestrictedComment = { comment, _ -> addedComment = comment }
+        )
+
+        val result = module(issue, TWO_SECONDS_AGO)
+        result.shouldBeRight(ModuleResponse)
+
+        // Attachment was redacted; issue should not have been made private
+        hasSetPrivate shouldBe false
+        hasDeletedAttachment shouldBe true
+        newAttachmentName shouldBe "redacted_$attachmentName"
+        newAttachmentContent shouldBe "... --accessToken ###REDACTED### ..."
+
+        addedComment shouldContain uploader
+        addedComment shouldContain newAttachmentName
+    }
+
+    "should not redact bot attachments" {
+        val module = PrivacyModule("message", "comment", ALLOWED_REGEX, AccessTokenRedactor, emptyList())
+        var hasSetPrivate = false
+        var hasDeletedAttachment = false
+
+        val issue = mockIssue(
+            attachments = listOf(
+                mockAttachment(
+                    uploader = mockUser(
+                        isBotUser = { true }
+                    ),
+                    // Example JWT token from https://jwt.io/
+                    getContent = { "... --accessToken eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c ...".toByteArray() },
+                    remove = { hasDeletedAttachment = true }
+                )
+            ),
+            setPrivate = { hasSetPrivate = true }
+        )
+
+        val result = module(issue, TWO_SECONDS_AGO)
+        result.shouldBeRight(ModuleResponse)
+
+        hasSetPrivate shouldBe true
+        hasDeletedAttachment shouldBe false
+    }
+
+    "should not redact attachments with non-redactable content" {
+        val module = PrivacyModule("message", "comment", ALLOWED_REGEX, AccessTokenRedactor, emptyList())
+
+        var hasSetPrivate = false
+        var hasDeletedAttachment = false
+
+        val issue = mockIssue(
+            attachments = listOf(
+                mockAttachment(
+                    // Redactor does not handle this; but it represents sensitive data
+                    getContent = { "My transaction ID is braintree:1a2b3c4d".toByteArray() },
+                    remove = { hasDeletedAttachment = true }
+                )
+            ),
+            setPrivate = { hasSetPrivate = true }
+        )
+
+        val result = module(issue, TWO_SECONDS_AGO)
+        result.shouldBeRight(ModuleResponse)
+
+        hasSetPrivate shouldBe true
+        hasDeletedAttachment shouldBe false
+    }
+
+    "should redact attachments even if issue is made private" {
+        val madePrivateMessage = "message"
+        val module = PrivacyModule(madePrivateMessage, "comment", ALLOWED_REGEX, AccessTokenRedactor, emptyList())
+
+        var hasSetPrivate = false
+        var hasDeletedAttachment = false
+        var hasAddedNewAttachment = false
+        val addedComments = mutableListOf<String>()
+
+        val issue = mockIssue(
+            attachments = listOf(
+                mockAttachment(
+                    // Example JWT token from https://jwt.io/
+                    getContent = { "... --accessToken eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c ...".toByteArray() },
+                    remove = { hasDeletedAttachment = true }
+                )
+            ),
+            setPrivate = { hasSetPrivate = true },
+            addAttachment = { _, cleanupCallback ->
+                hasAddedNewAttachment = true
+                cleanupCallback()
+            },
+            addRawRestrictedComment = { comment, _ -> addedComments.add(comment) }
+        )
+
+        val result = module(issue, TWO_SECONDS_AGO)
+        result.shouldBeRight(ModuleResponse)
+
+        hasSetPrivate shouldBe true
+        // Issue was made private, but attachment should have been redacted anyways
+        hasDeletedAttachment shouldBe true
+        hasAddedNewAttachment shouldBe true
+        addedComments shouldContain madePrivateMessage
+        addedComments shouldContain "" // TODO
+    }
+
+    "should make private if redacting does not remove all sensitive data" {
+        val madePrivateMessage = "message"
+        val module = PrivacyModule(madePrivateMessage, "comment", ALLOWED_REGEX, AccessTokenRedactor, emptyList())
+
+        var hasSetPrivate = false
+        var hasDeletedAttachment = false
+        val addedComments = mutableListOf<String>()
+
+        val issue = mockIssue(
+            attachments = listOf(
+                mockAttachment(
+                    // Example JWT token from https://jwt.io/
+                    getContent = { (
+                        "... --accessToken eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c ...\n"
+                        // This cannot be redacted
+                        + "My transaction ID is braintree:1a2b3c4d"
+                    ).toByteArray() },
+                    remove = { hasDeletedAttachment = true }
+                )
+            ),
+            setPrivate = { hasSetPrivate = true },
+            addRawRestrictedComment = { comment, _ -> addedComments.add(comment) }
+        )
+
+        val result = module(issue, TWO_SECONDS_AGO)
+        result.shouldBeRight(ModuleResponse)
+
+        hasSetPrivate shouldBe true
+        hasDeletedAttachment shouldBe false
+        addedComments shouldContainExactly listOf(madePrivateMessage)
     }
 })

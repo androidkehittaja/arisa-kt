@@ -7,7 +7,7 @@ class PurgeAttachmentCommand {
         return issue.attachments
             .filter {
                 // Make sure that attachment is uploaded by the specified user
-                it.uploader?.name == userName
+                it.uploader.name == userName
             }
             .filter {
                 // Don't delete attachments with an ID outside of ID range
