@@ -102,6 +102,7 @@ arisa:
         - '.rtf'
         - '.pptx'
         - '.sys'
+        - '.elf'
       comment: attach-new-attachment
 
     duplicateMessage:
